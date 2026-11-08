@@ -77,7 +77,6 @@ export function buildSslConfig(envVars = process.env) {
   }
 }
 
-const ssl = buildSslConfig()
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || '127.0.0.1',
