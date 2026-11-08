@@ -44,6 +44,9 @@ async function execute(sql, params = []) {
   if (sql.includes('FROM habitacion') && sql.includes('FOR UPDATE')) {
     return [[{ id_habitacion: 20, estado: 'Disponible', capacidad_adultos: 2, capacidad_ninos: 1, precio_noche: '120.50' }]]
   }
+  if (sql.includes('SELECT * FROM habitacion')) {
+    return [[{ id_habitacion: 20, numero: 20, tipo: 'Doble', estado: 'Disponible', capacidad_adultos: 2, capacidad_ninos: 1, precio_noche: '120.50' }]]
+  }
   if (sql.includes('SELECT id FROM reservas')) return [overlaps]
   if (sql.startsWith('INSERT INTO reservas')) return [{ insertId: 50 }]
   if (sql.includes('FROM reservas WHERE id =')) return [reservationRows.filter(r => r.id === params[0] && r.id_usuario === params[1])]
@@ -265,22 +268,130 @@ test('una orden modificada se rechaza antes de cobrar y no marca la reserva paga
   }
 })
 
-test('cookie Secure y prefijo __Host en un despliegue HTTPS', async () => {
-  const cookie = env.cookie, name = env.cookieName
-  env.cookie = { ...cookie, secure: true }
+test('cookie Secure, SameSite=None, HttpOnly y flujo cross-site autorizado entre Netlify y Render', async () => {
+  const cookie = env.cookie, name = env.cookieName, origins = env.frontendOrigins, prod = env.production
+  const netlifyOrigin = 'https://calm-cocada-ea7dba.netlify.app'
+  env.production = true
+  env.cookie = { httpOnly: true, secure: true, sameSite: 'none', path: '/' }
   env.cookieName = '__Host-aurora.sid'
+  env.frontendOrigins = [netlifyOrigin]
   let httpsServer
   try {
     const app = createApp({ sessionStore: new session.MemoryStore(), rateLimiter: (req, res, next) => next() })
-    app.set('trust proxy', 1)
     httpsServer = app.listen(0, '127.0.0.1')
     await new Promise(resolve => httpsServer.once('listening', resolve))
-    const response = await fetch('http://127.0.0.1:' + httpsServer.address().port + '/auth/csrf', { headers: { 'X-Forwarded-Proto': 'https' } })
-    assert.match(response.headers.get('set-cookie'), /^__Host-aurora.sid=/)
-    assert.match(response.headers.get('set-cookie'), /; Secure/)
-    assert.match(response.headers.get('set-cookie'), /; Path=\//)
+    const url = 'http://127.0.0.1:' + httpsServer.address().port
+
+    // 1. Bootstrap CSRF y cookie cross-site desde Netlify
+    const csrfRes = await fetch(url + '/auth/csrf', {
+      headers: { Origin: netlifyOrigin, 'Sec-Fetch-Site': 'cross-site', 'X-Forwarded-Proto': 'https' }
+    })
+    assert.equal(csrfRes.status, 200)
+    assert.equal(csrfRes.headers.get('access-control-allow-origin'), netlifyOrigin)
+    assert.equal(csrfRes.headers.get('access-control-allow-credentials'), 'true')
+    const setCookie = csrfRes.headers.get('set-cookie')
+    assert.match(setCookie, /^__Host-aurora\.sid=/)
+    assert.match(setCookie, /; HttpOnly/)
+    assert.match(setCookie, /; Secure/)
+    assert.match(setCookie, /; SameSite=None/)
+    assert.match(setCookie, /; Path=\//)
+    const { csrfToken: token } = await csrfRes.json()
+    const sidCookie = setCookie.split(';')[0]
+
+    // 2. Registro cross-site desde Netlify autorizado con CSRF válido funciona (201)
+    const registerRes = await fetch(url + '/usuariosRegistro', {
+      method: 'POST',
+      headers: {
+        Origin: netlifyOrigin,
+        'Sec-Fetch-Site': 'cross-site',
+        'X-Forwarded-Proto': 'https',
+        'Content-Type': 'application/json',
+        Cookie: sidCookie,
+        'X-CSRF-Token': token
+      },
+      body: JSON.stringify({
+        nombres: 'Sofía',
+        apellidos: 'Gómez',
+        email: 'sofia@example.com',
+        password: 'password123'
+      })
+    })
+    assert.equal(registerRes.status, 201)
+    const registerData = await registerRes.json()
+    const registerCookie = registerRes.headers.get('set-cookie').split(';')[0]
+
+    // 3. Login cross-site desde Netlify autorizado con CSRF válido funciona (200)
+    const loginRes = await fetch(url + '/usuariosLogin', {
+      method: 'POST',
+      headers: {
+        Origin: netlifyOrigin,
+        'Sec-Fetch-Site': 'cross-site',
+        'X-Forwarded-Proto': 'https',
+        'Content-Type': 'application/json',
+        Cookie: registerCookie,
+        'X-CSRF-Token': registerData.csrfToken
+      },
+      body: JSON.stringify({ email: 'ana@example.com', password: 'password123' })
+    })
+    assert.equal(loginRes.status, 200)
+    const loginData = await loginRes.json()
+    const authCookie = loginRes.headers.get('set-cookie').split(';')[0]
+
+    // 4. Persistencia de sesión (/auth/me) y consulta de habitaciones (/MostrarHabitacionesUsuario)
+    const meRes = await fetch(url + '/auth/me', {
+      headers: { Origin: netlifyOrigin, 'Sec-Fetch-Site': 'cross-site', 'X-Forwarded-Proto': 'https', Cookie: authCookie }
+    })
+    assert.equal(meRes.status, 200)
+    assert.equal((await meRes.json()).usuario.email, 'ana@example.com')
+
+    const roomsRes = await fetch(url + '/MostrarHabitacionesUsuario', {
+      headers: { Origin: netlifyOrigin, 'Sec-Fetch-Site': 'cross-site', 'X-Forwarded-Proto': 'https' }
+    })
+    assert.equal(roomsRes.status, 200)
+    assert.equal((await roomsRes.json())[0].numero, 20)
+
+    // 5. Rechaza cross-site desde origen desconocido o sin Origin, y rechaza sin CSRF
+    const badOriginRes = await fetch(url + '/usuariosLogin', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://malicioso.netlify.app',
+        'Sec-Fetch-Site': 'cross-site',
+        'X-Forwarded-Proto': 'https',
+        'Content-Type': 'application/json',
+        Cookie: authCookie,
+        'X-CSRF-Token': loginData.csrfToken
+      },
+      body: JSON.stringify({ email: 'ana@example.com', password: 'password123' })
+    })
+    assert.equal(badOriginRes.status, 403)
+
+    const noOriginCrossSite = await fetch(url + '/usuariosLogin', {
+      method: 'POST',
+      headers: {
+        'Sec-Fetch-Site': 'cross-site',
+        'X-Forwarded-Proto': 'https',
+        'Content-Type': 'application/json',
+        Cookie: authCookie,
+        'X-CSRF-Token': loginData.csrfToken
+      },
+      body: JSON.stringify({ email: 'ana@example.com', password: 'password123' })
+    })
+    assert.equal(noOriginCrossSite.status, 403)
+
+    const noCsrfRes = await fetch(url + '/usuariosLogin', {
+      method: 'POST',
+      headers: {
+        Origin: netlifyOrigin,
+        'Sec-Fetch-Site': 'cross-site',
+        'X-Forwarded-Proto': 'https',
+        'Content-Type': 'application/json',
+        Cookie: authCookie
+      },
+      body: JSON.stringify({ email: 'ana@example.com', password: 'password123' })
+    })
+    assert.equal(noCsrfRes.status, 403)
   } finally {
-    env.cookie = cookie; env.cookieName = name
+    env.production = prod; env.cookie = cookie; env.cookieName = name; env.frontendOrigins = origins
     if (httpsServer) await new Promise(resolve => httpsServer.close(resolve))
   }
 })

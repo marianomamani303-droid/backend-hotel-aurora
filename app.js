@@ -3,7 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import session from 'express-session'
-import { env, validateEnvironment } from './config/env.js'
+import { env, normalizeOrigin, validateEnvironment } from './config/env.js'
 import { MysqlSessionStore } from './config/sessionStore.js'
 import { checkOrigin, protectCsrf } from './middlewares/csrf.js'
 import { limiter } from './middlewares/rateLimit.js'
@@ -14,12 +14,14 @@ export function createApp({ sessionStore = new MysqlSessionStore(), rateLimiter 
   validateEnvironment()
   const app = express()
   app.disable('x-powered-by')
-  // Configurar solo la cantidad real de proxies confiables; sin confiar en cualquier IP.
-  if (process.env.TRUST_PROXY_HOPS) app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS))
+  // Configurar solo la cantidad real de proxies confiables; en producción (Render) usa 1 salto por defecto.
+  const proxyHops = process.env.TRUST_PROXY_HOPS ? Number(process.env.TRUST_PROXY_HOPS) : (env.production ? 1 : 0)
+  if (proxyHops > 0) app.set('trust proxy', proxyHops)
   app.use(helmet())
   app.use(cors({
     origin(origin, callback) {
-      if (!origin || env.frontendOrigins.includes(origin)) return callback(null, true)
+      const normalized = normalizeOrigin(origin)
+      if (!normalized || env.frontendOrigins.includes(normalized)) return callback(null, true)
       callback(new HttpError(403, 'Origen no permitido.'))
     },
     credentials: true,
@@ -33,6 +35,7 @@ export function createApp({ sessionStore = new MysqlSessionStore(), rateLimiter 
   app.use((req, res, next) => { req.body ||= {}; res.set('Cache-Control', 'no-store'); next() })
   app.use(session({
     name: env.cookieName, secret: env.sessionSecret, store: sessionStore,
+    proxy: proxyHops > 0,
     resave: false, saveUninitialized: false, rolling: false,
     cookie: { ...env.cookie, maxAge: env.sessionMaxAge }
   }))

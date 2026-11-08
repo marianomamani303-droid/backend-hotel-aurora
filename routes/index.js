@@ -12,7 +12,10 @@ import upload from '../config/upload.js'
 
 const router = Router()
 const admin = [requireAuth, requireAdmin]
-router.get('/auth/csrf', (req, res) => res.json({ csrfToken: csrfToken(req) }))
+router.get('/auth/csrf', (req, res, next) => {
+  const token = csrfToken(req)
+  req.session.save(error => error ? next(error) : res.json({ csrfToken: token }))
+})
 router.get('/auth/me', requireAuth, usuarioActual)
 router.post('/auth/logout', requireAuth, cerrarSesion)
 const authIp = limiter('auth-ip', 30, 15 * 60 * 1000)

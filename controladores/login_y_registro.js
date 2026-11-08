@@ -20,8 +20,10 @@ export async function loguearUsuario(req, res) {
   const token = await startSession(req, usuario)
   res.json({ mensaje: 'Has iniciado sesión exitosamente.', usuario, csrfToken: token })
 }
-export function usuarioActual(req, res) {
-  res.json({ usuario: req.user, csrfToken: csrfToken(req) })
+export async function usuarioActual(req, res) {
+  const token = csrfToken(req)
+  await new Promise((resolve, reject) => req.session.save(error => error ? reject(error) : resolve()))
+  res.json({ usuario: req.user, csrfToken: token })
 }
 export async function cerrarSesion(req, res) {
   await new Promise((resolve, reject) => req.session.destroy(error => error ? reject(error) : resolve()))
