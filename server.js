@@ -26,7 +26,12 @@ try {
     })
   }
 } catch (error) {
-  console.error('No se pudo iniciar el servidor:', error.code || error.message)
+  console.error('No se pudo iniciar el servidor:', JSON.stringify({
+    code: error?.code ?? null,
+    errno: error?.errno ?? null,
+    sqlState: error?.sqlState ?? null,
+    sqlMessage: error?.sqlMessage || error?.message || 'Error desconocido'
+  }))
   console.error('Revisá el entorno, MySQL y ejecutá npm run db:migrate.')
   await pool.end()
   process.exitCode = 1

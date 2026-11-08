@@ -7,8 +7,8 @@ process.env.SESSION_SECRET ||= 'test-only-secret-abcdefghijklmnopqrstuvwxyz-1234
 process.env.NODE_ENV = 'test'
 process.env.USER_ROLE = 'usuario'
 const { createApp } = await import('../app.js')
-const { default: pool, buildSslConfig, resolveDatabaseName } = await import('../config/database.js')
-const { runMigrations } = await import('../scripts/migrate.js')
+const { default: pool, buildSslConfig, resolveDatabaseName, resolveConnectionOptions } = await import('../config/database.js')
+const { runMigrations, formatMigrationError } = await import('../scripts/migrate.js')
 const { env } = await import('../config/env.js')
 const { createReservation } = await import('../services/reservas.js')
 const { createOrder, captureOrder, verifyPayment } = await import('../services/paypal.js')
@@ -349,4 +349,48 @@ test('migración crea todas las tablas en orden de dependencias y es idempotente
   assert.match(creates[4], /CREATE TABLE IF NOT EXISTS app_sessions/)
   assert.match(creates[5], /CREATE TABLE IF NOT EXISTS app_rate_limits/)
 })
+
+test('migración identifica el paso exacto que falla y expone code, errno, sqlState y sqlMessage sin credenciales', async () => {
+  const failingDb = {
+    escape: val => `'${val}'`,
+    async query(sql) {
+      if (sql.includes('CREATE TABLE IF NOT EXISTS habitacion')) {
+        const err = new Error('Unknown error')
+        err.code = 'ER_UNKNOWN_ERROR'
+        err.errno = 1105
+        err.sqlState = 'HY000'
+        err.sqlMessage = 'Connections using insecure transport are prohibited.'
+        throw err
+      }
+      return [[]]
+    }
+  }
+  await assert.rejects(
+    runMigrations(failingDb, 'usuario'),
+    error => {
+      const formatted = formatMigrationError(error)
+      assert.deepEqual(formatted, {
+        step: 'createTable:habitacion',
+        code: 'ER_UNKNOWN_ERROR',
+        errno: 1105,
+        sqlState: 'HY000',
+        sqlMessage: 'Connections using insecure transport are prohibited.'
+      })
+      return true
+    }
+  )
+  const opts = resolveConnectionOptions({
+    DB_HOST: ' "gateway01.sa-east-1.prod.aws.tidbcloud.com" ',
+    DB_USER: ' "5n8SskbmwVZJSUw.root" ',
+    DB_PORT: ' "4000" ',
+    DB_NAME: ' "sys" ',
+    DB_SSL: ' "true" '
+  })
+  assert.equal(opts.host, 'gateway01.sa-east-1.prod.aws.tidbcloud.com')
+  assert.equal(opts.user, '5n8SskbmwVZJSUw.root')
+  assert.equal(opts.port, 4000)
+  assert.equal(opts.database, 'hotel_aurora')
+  assert.equal(opts.ssl.rejectUnauthorized, true)
+})
+
 

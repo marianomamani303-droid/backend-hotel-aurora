@@ -1,4 +1,3 @@
-
 import 'dotenv/config'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -11,8 +10,19 @@ const backendRoot = path.resolve(
   '..'
 )
 
+function cleanEnv(value) {
+  const trimmed = String(value ?? '').trim()
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim()
+  }
+  return trimmed
+}
+
 export function resolveDatabaseName(envVars = process.env) {
-  const name = String(envVars.DB_NAME || '').trim()
+  const name = cleanEnv(envVars.DB_NAME)
   if (!name || name.toLowerCase() === 'sys') {
     return 'hotel_aurora'
   }
@@ -20,21 +30,19 @@ export function resolveDatabaseName(envVars = process.env) {
 }
 
 export function buildSslConfig(envVars = process.env) {
-  const mode = String(envVars.DB_SSL || '').trim().toLowerCase()
+  const mode = cleanEnv(envVars.DB_SSL).toLowerCase()
 
   if (['false', '0', 'no', 'off', 'disabled'].includes(mode)) {
     return undefined
   }
 
-  const host = String(envVars.DB_HOST || '').trim().toLowerCase()
+  const host = cleanEnv(envVars.DB_HOST).toLowerCase()
 
   const rawCa = envVars.DB_SSL_CA
-    ? envVars.DB_SSL_CA.replace(/\\n/g, '\n').trim()
+    ? cleanEnv(envVars.DB_SSL_CA).replace(/\\n/g, '\n').trim()
     : ''
 
-  const caPath = envVars.DB_SSL_CA_PATH
-    ? String(envVars.DB_SSL_CA_PATH).trim()
-    : ''
+  const caPath = cleanEnv(envVars.DB_SSL_CA_PATH)
 
   const sslEnabled = Boolean(
     rawCa ||
@@ -52,11 +60,9 @@ export function buildSslConfig(envVars = process.env) {
       ? caPath
       : path.resolve(backendRoot, caPath)
 
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`No se encontró el certificado SSL: ${caPath}`)
+    if (fs.existsSync(resolvedPath)) {
+      ca = fs.readFileSync(resolvedPath, 'utf8')
     }
-
-    ca = fs.readFileSync(resolvedPath, 'utf8')
   }
 
   return {
@@ -68,21 +74,30 @@ export function buildSslConfig(envVars = process.env) {
   }
 }
 
-const ssl = buildSslConfig()
+export function resolveConnectionOptions(envVars = process.env, includeDatabase = true) {
+  const ssl = buildSslConfig(envVars)
+  const host = cleanEnv(envVars.DB_HOST) || '127.0.0.1'
+  const user = cleanEnv(envVars.DB_USER) || 'root'
+  const port = Number(cleanEnv(envVars.DB_PORT) || 3306)
+
+  return {
+    host,
+    user,
+    password: envVars.DB_PASSWORD || '',
+    ...(includeDatabase ? { database: resolveDatabaseName(envVars) } : {}),
+    port,
+    ...(ssl ? { ssl } : {}),
+    charset: 'utf8mb4'
+  }
+}
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || '127.0.0.1',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: resolveDatabaseName(),
-  port: Number(process.env.DB_PORT || 3306),
-  ...(ssl ? { ssl } : {}),
+  ...resolveConnectionOptions(process.env, true),
   connectionLimit: 10,
   waitForConnections: true,
   queueLimit: 100,
   dateStrings: true,
   timezone: 'Z',
-  charset: 'utf8mb4',
   multipleStatements: false
 })
 
