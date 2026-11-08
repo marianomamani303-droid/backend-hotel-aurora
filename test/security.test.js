@@ -7,7 +7,8 @@ process.env.SESSION_SECRET ||= 'test-only-secret-abcdefghijklmnopqrstuvwxyz-1234
 process.env.NODE_ENV = 'test'
 process.env.USER_ROLE = 'usuario'
 const { createApp } = await import('../app.js')
-const { default: pool } = await import('../config/database.js')
+const { default: pool, buildSslConfig, resolveDatabaseName } = await import('../config/database.js')
+const { runMigrations } = await import('../scripts/migrate.js')
 const { env } = await import('../config/env.js')
 const { createReservation } = await import('../services/reservas.js')
 const { createOrder, captureOrder, verifyPayment } = await import('../services/paypal.js')
@@ -283,3 +284,69 @@ test('cookie Secure y prefijo __Host en un despliegue HTTPS', async () => {
     if (httpsServer) await new Promise(resolve => httpsServer.close(resolve))
   }
 })
+
+test('configuración SSL valida certificados estrictamente y resuelve base de datos', () => {
+  assert.equal(buildSslConfig({ DB_SSL: 'false', DB_HOST: '127.0.0.1' }), undefined)
+  const tidbSsl = buildSslConfig({ DB_HOST: 'gateway01.sa-east-1.prod.aws.tidbcloud.com', DB_SSL: 'true' })
+  assert.equal(tidbSsl.minVersion, 'TLSv1.2')
+  assert.equal(tidbSsl.rejectUnauthorized, true)
+  assert.ok(Array.isArray(tidbSsl.ca) && tidbSsl.ca.length > 0)
+  const inlineSsl = buildSslConfig({ DB_SSL: 'true', DB_SSL_CA: '-----BEGIN CERTIFICATE-----\\nTEST\\n-----END CERTIFICATE-----' })
+  assert.equal(inlineSsl.rejectUnauthorized, true)
+  assert.match(inlineSsl.ca[0], /BEGIN CERTIFICATE/)
+  assert.equal(resolveDatabaseName({ DB_NAME: 'sys' }), 'hotel_aurora')
+  assert.equal(resolveDatabaseName({ DB_NAME: 'hotel_aurora' }), 'hotel_aurora')
+})
+
+test('migración crea todas las tablas en orden de dependencias y es idempotente', async () => {
+  const executed = []
+  const fakeDb = {
+    escape: val => `'${val}'`,
+    async query(sql) {
+      executed.push(sql)
+      if (sql.includes("SHOW COLUMNS FROM usuario LIKE 'id'")) return [[{ Type: 'bigint' }]]
+      if (sql.includes("SHOW COLUMNS FROM habitacion LIKE 'id_habitacion'")) return [[{ Type: 'bigint' }]]
+      if (sql.includes("SHOW COLUMNS FROM reservas LIKE 'id'")) return [[{ Type: 'bigint' }]]
+      if (sql.includes('information_schema.TABLES')) {
+        return [[
+          { tableName: 'usuario', engine: 'InnoDB' },
+          { tableName: 'habitacion', engine: 'InnoDB' },
+          { tableName: 'reservas', engine: 'InnoDB' },
+          { tableName: 'app_payments', engine: 'InnoDB' },
+          { tableName: 'app_sessions', engine: 'InnoDB' },
+          { tableName: 'app_rate_limits', engine: 'InnoDB' }
+        ]]
+      }
+      if (sql.includes("SHOW COLUMNS FROM usuario LIKE 'rol'")) {
+        return [[{ Type: "enum('usuario','admin')", Default: 'usuario', Null: 'NO' }]]
+      }
+      if (sql.includes("SHOW COLUMNS FROM reservas LIKE 'estado'")) {
+        return [[{ Type: "enum('pendiente','pagado','confirmada','cancelada','cancelado')", Default: 'pendiente', Null: 'NO' }]]
+      }
+      if (sql.includes('SHOW INDEX FROM usuario')) {
+        return [[{ Key_name: 'app_usuario_email', Column_name: 'email', Non_unique: 0 }]]
+      }
+      if (sql.includes('SHOW INDEX FROM habitacion')) {
+        return [[{ Key_name: 'app_habitacion_numero', Column_name: 'numero', Non_unique: 0 }]]
+      }
+      if (sql.includes('SHOW INDEX FROM reservas')) {
+        return [[
+          { Key_name: 'app_reservas_disponibilidad', Column_name: 'id_habitacion', Non_unique: 1 },
+          { Key_name: 'app_reservas_usuario', Column_name: 'id_usuario', Non_unique: 1 }
+        ]]
+      }
+      return [[]]
+    }
+  }
+  await runMigrations(fakeDb, 'usuario')
+  await runMigrations(fakeDb, 'usuario')
+  const creates = executed.filter(s => s.startsWith('CREATE TABLE IF NOT EXISTS'))
+  assert.equal(creates.length, 12)
+  assert.match(creates[0], /CREATE TABLE IF NOT EXISTS usuario/)
+  assert.match(creates[1], /CREATE TABLE IF NOT EXISTS habitacion/)
+  assert.match(creates[2], /CREATE TABLE IF NOT EXISTS reservas/)
+  assert.match(creates[3], /CREATE TABLE IF NOT EXISTS app_payments/)
+  assert.match(creates[4], /CREATE TABLE IF NOT EXISTS app_sessions/)
+  assert.match(creates[5], /CREATE TABLE IF NOT EXISTS app_rate_limits/)
+})
+

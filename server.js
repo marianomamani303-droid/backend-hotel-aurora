@@ -5,6 +5,9 @@ import { env } from './config/env.js'
 try {
   const app = createApp()
   await pool.query('SELECT 1')
+  await pool.query('SELECT id FROM usuario LIMIT 0')
+  await pool.query('SELECT id_habitacion FROM habitacion LIMIT 0')
+  await pool.query('SELECT id FROM reservas LIMIT 0')
   await pool.query('SELECT sid_hash FROM app_sessions LIMIT 0')
   await pool.query('SELECT key_hash FROM app_rate_limits LIMIT 0')
   await pool.query('SELECT order_id FROM app_payments LIMIT 0')
