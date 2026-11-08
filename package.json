@@ -16,10 +16,11 @@
   "name": "hotel-aurora-api",
   "private": true,
   "scripts": {
-    "start": "node scripts/migrate.js && node server.js",
+    "start": "node scripts/migrate.js && node scripts/seed.js && node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
-    "db:migrate": "node scripts/migrate.js"
+    "db:migrate": "node scripts/migrate.js",
+    "db:seed": "node scripts/seed.js"
   },
   "engines": {
     "node": ">=20.19"

@@ -9,6 +9,7 @@ process.env.USER_ROLE = 'usuario'
 const { createApp } = await import('../app.js')
 const { default: pool, buildSslConfig, resolveDatabaseName, resolveConnectionOptions } = await import('../config/database.js')
 const { runMigrations, formatMigrationError } = await import('../scripts/migrate.js')
+const { INITIAL_ROOMS, seedRooms } = await import('../scripts/seed.js')
 const { env } = await import('../config/env.js')
 const { createReservation } = await import('../services/reservas.js')
 const { createOrder, captureOrder, verifyPayment } = await import('../services/paypal.js')
@@ -44,8 +45,11 @@ async function execute(sql, params = []) {
   if (sql.includes('FROM habitacion') && sql.includes('FOR UPDATE')) {
     return [[{ id_habitacion: 20, estado: 'Disponible', capacidad_adultos: 2, capacidad_ninos: 1, precio_noche: '120.50' }]]
   }
+  if (sql.includes('SELECT * FROM habitacion WHERE numero IN (20, 80, 100)')) {
+    return [INITIAL_ROOMS.filter(r => [20, 80, 100].includes(r.numero)).map((r, i) => ({ id_habitacion: i + 1, ...r }))]
+  }
   if (sql.includes('SELECT * FROM habitacion')) {
-    return [[{ id_habitacion: 20, numero: 20, tipo: 'Doble', estado: 'Disponible', capacidad_adultos: 2, capacidad_ninos: 1, precio_noche: '120.50' }]]
+    return [INITIAL_ROOMS.map((r, i) => ({ id_habitacion: i + 1, ...r }))]
   }
   if (sql.includes('SELECT id FROM reservas')) return [overlaps]
   if (sql.startsWith('INSERT INTO reservas')) return [{ insertId: 50 }]
@@ -503,5 +507,71 @@ test('migración identifica el paso exacto que falla y expone code, errno, sqlSt
   assert.equal(opts.database, 'hotel_aurora')
   assert.equal(opts.ssl.rejectUnauthorized, true)
 })
+
+test('seed de habitaciones es idempotente y expone las 3 destacadas (20, 80, 100) y las 6 totales', async () => {
+  assert.deepEqual(INITIAL_ROOMS.map(r => r.numero), [20, 80, 100, 101, 102, 103])
+  const prices = new Set(INITIAL_ROOMS.map(r => r.precio_noche))
+  assert.equal(prices.size, 6)
+
+  for (const room of INITIAL_ROOMS) {
+    const validated = validateRoom({
+      numero: String(room.numero),
+      piso: String(room.piso),
+      tipo: room.tipo,
+      estado: room.estado,
+      capacidadAdultos: String(room.capacidad_adultos),
+      capacidadNinos: String(room.capacidad_ninos),
+      precioNoche: room.precio_noche,
+      cantidadCamas: String(room.cantidad_camas),
+      tipoCama: room.tipo_cama,
+      vista: room.vista,
+      descripcion: room.descripcion,
+      banioPrivado: room.banio_privado,
+      aireAcondicionado: room.aire_acondicionado,
+      wifi: room.wifi,
+      tv: room.tv,
+      minibar: room.minibar,
+      balcon: room.balcon,
+      accesible: room.accesible
+    })
+    assert.equal(validated.numero, room.numero)
+    assert.match(room.enlace_imagen, /^https:\/\//)
+  }
+
+  const stored = new Map()
+  const fakeSeedDb = {
+    async execute(sql, params = []) {
+      if (sql.startsWith('SELECT numero FROM habitacion')) {
+        return [[...stored.values()].map(r => ({ numero: r.numero }))]
+      }
+      if (sql.startsWith('INSERT INTO habitacion')) {
+        const numero = params[0]
+        if (stored.has(numero)) throw new Error('No debe sobrescribir ni duplicar habitación ' + numero)
+        stored.set(numero, { numero, precio_noche: params[6] })
+        return [{ insertId: stored.size }]
+      }
+      throw new Error('SQL inesperado en seed: ' + sql)
+    }
+  }
+
+  const firstRun = await seedRooms(fakeSeedDb)
+  assert.deepEqual(firstRun, { inserted: 6, skipped: 0 })
+  assert.equal(stored.size, 6)
+
+  const secondRun = await seedRooms(fakeSeedDb)
+  assert.deepEqual(secondRun, { inserted: 0, skipped: 6 })
+  assert.equal(stored.size, 6)
+
+  const featuredRes = await fetch(base + '/HabitacionesDestacadas')
+  assert.equal(featuredRes.status, 200)
+  const featured = await featuredRes.json()
+  assert.deepEqual(featured.map(r => r.numero), [20, 80, 100])
+
+  const allRoomsRes = await fetch(base + '/MostrarHabitacionesUsuario')
+  assert.equal(allRoomsRes.status, 200)
+  const allRooms = await allRoomsRes.json()
+  assert.deepEqual(allRooms.map(r => r.numero), [20, 80, 100, 101, 102, 103])
+})
+
 
 

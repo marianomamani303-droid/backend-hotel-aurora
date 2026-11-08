@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url'
 import mysql from 'mysql2/promise'
 import pool, { resolveConnectionOptions, resolveDatabaseName } from '../config/database.js'
 import { env } from '../config/env.js'
+import { seedRooms } from './seed.js'
 
 async function executeStep(step, work) {
   try {
@@ -300,7 +301,8 @@ if (isMain) {
   try {
     await ensureDatabaseExists()
     await runMigrations()
-    console.log('Migración completada. No se modificaron los datos existentes.')
+    const { inserted, skipped } = await executeStep('seedRooms:habitacion', () => seedRooms(pool))
+    console.log(`Migración completada. Habitaciones iniciales: ${inserted} insertadas, ${skipped} preexistentes conservadas.`)
   } catch (error) {
     const details = formatMigrationError(error)
     console.error('Migración detenida:', details.code || details.sqlMessage)
